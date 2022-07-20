@@ -1,0 +1,231 @@
+# The aim:
+    
+    # I've got some random points scattered in an interval.
+    # At each step I split the points in two. If the interval is less than
+    # delta long then we stop. If the interval has two points in then we stop.
+ 
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+
+class Node:
+    def __init__(self,  points):
+        """Points are tuples in the form (x, w, label)"""
+        self.points = points
+        self.children = []
+    @property
+    def left_end(self):
+        # I want the label of the tuple with the lowest x value.
+        minimum = self.points[0,0]
+        minimum_label = self.points[0,-1]
+        for point in self.points:
+            if point[0] < minimum:
+                minimum = point[0]
+                minimum_label = point[-1]
+        return int(minimum_label)
+    @property
+    def right_end(self):
+        maximum = self.points[0,0]
+        maximum_label = self.points[0,-1]
+        for point in self.points:
+            if point[0] > maximum:
+                maximum = point[0]
+                maximum_label = point[-1]
+        return int(maximum_label)
+    @property
+    def midpoint_value(self): # this is wrong
+        left_index = label_to_index(self.points,self.left_end)
+        right_index = label_to_index(self.points,self.right_end)
+        return 0.5*(self.points[left_index,0] + self.points[right_index,0])
+    @property
+    def width(self):
+        left_index = label_to_index(self.points,self.left_end)
+        right_index = label_to_index(self.points,self.right_end)
+        return self.points[right_index,0] - self.points[left_index,0]
+    @property
+    def positions(self):
+        return np.array([point[0] for point in self.points])
+    @property
+    def weights(self):
+        return np.array([point[-2] for point in self.points])
+    @property
+    def labels(self):
+        return np.array([point[-1] for point in self.points])
+    @property
+    def mean(self):
+        return np.average(self.positions, weights = self.weights)
+    @property
+    def variance(self):
+        return np.cov(self.positions, aweights = self.weights)
+
+def label_to_index(data, label):
+    index = 0
+    for i in range(len(data)):
+        if int(data[i,-1]) == int(label):
+            index = int(i)
+    return index
+        
+def split(node,delta, node_set):
+    if node.width > delta and len(node.points) > 2:  
+        left_child = Node(node.points[node.points[:,0] < node.midpoint_value])  # The points on the left of the midpoint of the subinterval
+        right_child = Node(node.points[node.points[:,0] >= node.midpoint_value])
+        node.children.append(left_child)  # To keep track of which intervals have come from where
+        node.children.append(right_child)
+        node_set.append(left_child)  # Adding the new nodes to the list of nodes
+        node_set.append(right_child)
+
+def sigma_points(leaf, threshold):
+    if len(leaf.points) <= threshold:
+        return leaf
+    else:
+        mean = leaf.mean
+        variance = leaf.variance
+
+        sigma_1_position = mean - np.sqrt(variance)
+        sigma_2_position = mean + np.sqrt(variance)
+
+        det = sigma_1_position*(sigma_1_position-mean)**2 + sigma_2_position*(sigma_2_position-mean)**2
+
+        A_inv = np.array([[ (sigma_2_position-mean)**2 , -sigma_2_position], [ -(sigma_1_position-mean)**2 , -sigma_1_position]])
+
+        new_weights = (1/det)*A_inv@np.array([mean,variance])
+        new_weights = sum(leaf.weights)*new_weights/sum(new_weights)
+
+
+        sigma_leaf = Node(np.array([[sigma_1_position, new_weights[0], leaf.labels[0]],[sigma_2_position, new_weights[1], leaf.labels[1]]]))
+        return sigma_leaf
+    
+
+delta = 0.05
+data = np.array([(0,0.25,0),(2,0.25,1),(5,0.25,2),(9,0.25,3)])  # Just as an easy example that can be checked by hand
+
+def compressed_data(data, delta, threshold):
+    
+    """Takes data and performs the KD-like algorithm along with a sigma point reduction"""
+    node_set = [Node(data)]  # Initialise the nodes with the starting interval
+
+    for node in node_set:
+        split(node,delta, node_set)   # Iteratively split up all intervals that are created
+    
+    leaves = []
+    for node in node_set:
+        if node.children == []:
+            leaves.append(node)   # Find the sub-intervals that don't contain other sub intervals
+    sigma_leaves = []
+    for leaf in leaves:
+        sigma_leaves.append( sigma_points(leaf, threshold))
+
+    total_new_points = sum([len(sigma_leaf.points) for sigma_leaf in sigma_leaves])
+    new_data = np.zeros((total_new_points,data.shape[1]))
+    current_row = 0
+    for sigma_leaf in sigma_leaves:
+        for point in sigma_leaf.points:
+            new_data[current_row , :] = point
+            new_data[current_row , -1] = current_row
+            current_row += 1
+
+    
+    return new_data
+
+def preallocated_new_cloud(cloud):
+    """Creates an array to house Euler solutions at the next time step
+
+    Parameters:
+    cloud (2d numpy array):  Position-like data and weights
+
+    Returns:
+    A 2d numpy array with twice as many rows as the old one
+    """
+    # extract dimension and do array with that 
+    return np.zeros((2*cloud.shape[0], cloud.shape[1]))
+
+def euler_estimate(x, f, g, h ):
+    """Returns the point and weight of the next upper Euler step
+
+    Takes a row of the matrix containting the information about the processes
+    along with the weights of the points, applies the upper Euler step, and then
+    halves the weight of the point.
+
+    Parameters:
+    x (numpy array): Contains the information about the root point with x[-1] being the weight
+    f (function): The drift term in the SDE
+    g (function): The diffusion-like term in the SDE
+    h (float): The size of the time step for the Euler method
+
+    Returns:
+    point (numpy array): An array containing the new position and weight of the point given by the Euler method
+    """
+    if len(x) == 3:
+        point = np.zeros((2,3))
+        position = x[:-2]
+        point[0,:-2] = position + f(position)*h + g(position)*np.sqrt(h)
+        point[1,:-2] = position + f(position)*h - g(position)*np.sqrt(h)
+        point[:,-2] = x[-2]/2
+    return point
+    
+def generate_new_point_cloud(point_cloud, f, g, h, delta, threshold):
+    oversized_cloud = preallocated_new_cloud(point_cloud)
+    for i in range(len(point_cloud)):
+        spawned_points = euler_estimate(point_cloud[i,:], f, g, h)
+        oversized_cloud[2*i,:] = spawned_points[0,:]
+        oversized_cloud[2*i+1,:] = spawned_points[1,:]
+    for i in range(len(oversized_cloud)):
+        oversized_cloud[i,-1] = i
+    return compressed_data(oversized_cloud, delta, threshold)
+
+
+
+
+def f(x):
+    return -1
+
+def g(x):
+    return 1
+
+threshold = 2
+
+"""
+mean_set = [cloud[0,0]]
+while t < T:
+    t += h
+    cloud = generate_new_point_cloud(cloud, f, g, h, delta, threshold)
+    cloud = cloud[cloud[:,-2] > 10**(-12)]
+    weight_sum = sum(cloud[:,-2])
+    cloud[:,-2] = cloud[:,-2]/weight_sum
+    mean_set.append(np.dot(cloud[:,-2], cloud[:,0]))
+            
+
+plt.plot(mean_set)
+plt.show()"""
+
+
+def plot_expected_values(SDE, intital_condition, termination, delta, h):
+    f = SDE[0]
+    g = SDE[1]
+    cloud = initial_condition
+    t = 0
+    mean_set = np.zeros(int(1 + T/h))
+    mean_set[0] = cloud[0,0]
+    index = 0
+    while t < T:
+        index += 1
+        t += h
+        cloud = generate_new_point_cloud(cloud, f, g, h, delta, threshold)
+        cloud = cloud[cloud[:,-2] > 10**(-12)]
+        weight_sum = sum(cloud[:,-2])
+        cloud[:,-2] = cloud[:,-2]/weight_sum
+        mean_set[index] = np.dot(cloud[:,-2], cloud[:,0])
+    plt.plot(np.linspace(0,1,101),mean_set)
+
+SDE = [f,g]
+initial_condition = np.array([[1,1,0]])
+T = 1
+h = 0.001
+
+for delta in np.linspace(0.01,0.12,10):
+    plot_expected_values(SDE, initial_condition, T, delta, h)
+            
+plt.legend(np.linspace(0.1,1,10))
+plt.show()
+    
